@@ -1,3 +1,6 @@
 [submodule "aient"]
 	path = aient
 	url = https://github.com/GoatAddy/aient.git
+[submodule "md2tgmd"]
+	path = md2tgmd
+	url = https://github.com/GoatAddy/md2tgmd.git
