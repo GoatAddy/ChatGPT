@@ -1,25 +1,20 @@
-import os
 import re
 import sys
 sys.dont_write_bytecode = True
+import base64
 import logging
 import traceback
 import utils.decorators as decorators
 
 from md2tgmd.src.md2tgmd import escape, split_code, replace_all
-from aient.src.aient.utils.prompt import translator_en2zh_prompt, translator_prompt
-from aient.src.aient.utils.scripts import Document_extract, claude_replace
-from aient.src.aient.core.utils import get_engine, get_image_message, get_text_message
+from aient.aient.utils.scripts import Document_extract
+from aient.aient.core.utils import get_engine, get_image_message, get_text_message
 import config
 from config import (
     WEB_HOOK,
     PORT,
     BOT_TOKEN,
     GET_MODELS,
-    GOOGLE_AI_API_KEY,
-    VERTEX_PROJECT_ID,
-    VERTEX_PRIVATE_KEY,
-    VERTEX_CLIENT_EMAIL,
     Users,
     PREFERENCES,
     LANGUAGES,
@@ -39,6 +34,7 @@ from config import (
     get_model_groups,
     CUSTOM_MODELS_LIST,
     MODEL_GROUPS,
+    get_initial_model,
 )
 
 from utils.i18n import strings
@@ -87,7 +83,7 @@ time_stamps = defaultdict(lambda: [])
 @decorators.GroupAuthorization
 @decorators.Authorization
 @decorators.APICheck
-async def command_bot(update, context, language=None, prompt=translator_prompt, title="", has_command=True):
+async def command_bot(update, context, title="", has_command=True):
     stop_event.clear()
     message, rawtext, image_url, chatid, messageid, reply_to_message_text, update_message, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text = await GetMesageInfo(update, context)
 
@@ -95,14 +91,6 @@ async def command_bot(update, context, language=None, prompt=translator_prompt, 
         if has_command:
             message = ' '.join(context.args)
         pass_history = Users.get_config(convo_id, "PASS_HISTORY")
-        if prompt and has_command:
-            if translator_prompt == prompt:
-                if language == "english":
-                    prompt = prompt.format(language)
-                else:
-                    prompt = translator_en2zh_prompt
-                pass_history = 0
-            message = prompt + message
         if message == None:
             message = voice_text
         # print("message", message)
@@ -248,10 +236,7 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
     image_has_send = 0
     model_name = engine
     language = Users.get_config(convo_id, "language")
-    if "claude" in model_name:
-        system_prompt = Users.get_config(convo_id, "claude_systemprompt")
-    else:
-        system_prompt = Users.get_config(convo_id, "systemprompt")
+    system_prompt = Users.get_config(convo_id, "systemprompt")
     plugins = Users.extract_plugins_config(convo_id)
 
     Frequency_Modification = 20
@@ -259,7 +244,7 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
         Frequency_Modification = 25
     if message_thread_id or convo_id.startswith("-"):
         Frequency_Modification = 35
-    if "gemini" in model_name and (GOOGLE_AI_API_KEY or (VERTEX_CLIENT_EMAIL and VERTEX_PRIVATE_KEY and VERTEX_PROJECT_ID)):
+    if "gemini" in model_name:
         Frequency_Modification = 1
 
 
@@ -282,14 +267,30 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
                 return
             if "message_search_stage_" not in data:
                 result = result + data
+            image_match = re.search(r"!\[image\]\(data:image\/png;base64,([a-zA-Z0-9+/=]+)\)", result)
+            if image_match and image_has_send == 0:
+                base64_str = image_match.group(1)
+                try:
+                    img_url = base64.b64decode(base64_str)
+                    media_group = []
+                    media_group.append(InputMediaPhoto(media=img_url))
+                    await context.bot.send_media_group(
+                        chat_id=chatid,
+                        media=media_group,
+                        message_thread_id=message_thread_id,
+                        reply_to_message_id=messageid,
+                    )
+                    result = result.replace(image_match.group(0), "")
+                    image_has_send = 1
+                except Exception as e:
+                    logger.warning(f"Could not process base64 image: {e}")
+                continue
             tmpresult = result
             if re.sub(r"```", '', result.split("\n")[-1]).count("`") % 2 != 0:
                 tmpresult = result + "`"
             if sum([line.strip().startswith("```") for line in result.split('\n')]) % 2 != 0:
                 tmpresult = tmpresult + "\n```"
             tmpresult = title + tmpresult
-            if "claude" in model_name:
-                tmpresult = claude_replace(tmpresult)
             if "message_search_stage_" in data:
                 tmpresult = strings[data][get_current_lang(convo_id)]
             history = robot.conversation[convo_id]
@@ -790,7 +791,7 @@ async def reset_chat(update, context):
             "tools": True,
             "image": True
         }
-        config.initial_model = remove_no_text_model(update_initial_model(provider))
+        config.initial_model = remove_no_text_model(await update_initial_model(provider))
     await delete_message(update, context, [message.message_id, user_message_id])
 
 @decorators.AdminAuthorization
@@ -876,13 +877,13 @@ async def unknown(update, context): # 当用户输入未知命令时，返回文
     # await context.bot.send_message(chat_id=update.effective_chat.id, text="Sorry, I didn't understand that command.")
 
 async def post_init(application: Application) -> None:
+    if GET_MODELS:
+        await get_initial_model()
     await application.bot.set_my_commands([
         BotCommand('info', 'Basic information'),
         BotCommand('reset', 'Reset the bot'),
         BotCommand('start', 'Start the bot'),
         BotCommand('model', 'Change AI model'),
-        BotCommand('en2zh', 'Translate to Chinese'),
-        BotCommand('zh2en', 'Translate to English'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
@@ -913,11 +914,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset_chat))
     application.add_handler(CommandHandler("model", change_model))
-    application.add_handler(CommandHandler("en2zh", lambda update, context: command_bot(update, context, "Simplified Chinese")))
-    application.add_handler(CommandHandler("zh2en", lambda update, context: command_bot(update, context, "english")))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
-    application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))
+    application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, has_command=False), block = False))
     application.add_handler(MessageHandler(
         filters.CAPTION &
         (
@@ -933,7 +932,7 @@ if __name__ == '__main__':
                 filters.Document.FileExtension("py") |
                 filters.Document.FileExtension("yml")
             )
-        ), lambda update, context: command_bot(update, context, prompt=None, has_command=False)))
+        ), lambda update, context: command_bot(update, context, has_command=False)))
     application.add_handler(MessageHandler(
         ~filters.CAPTION &
         (
