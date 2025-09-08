@@ -3,15 +3,14 @@ import subprocess
 from dotenv import load_dotenv
 load_dotenv()
 
-import re
 from utils.i18n import strings
 from datetime import datetime
 
 # We expose variables for access from other modules
 
-from aient.src.aient.utils import prompt
-from aient.src.aient.core.utils import update_initial_model, BaseAPI
-from aient.src.aient.models import chatgpt, groq, claude3, gemini, vertex, PLUGINS, whisper, DuckChat
+from aient.aient.utils import prompt
+from aient.aient.core.utils import update_initial_model, BaseAPI
+from aient.aient.models import chatgpt, PLUGINS, whisper
 
 from telegram import InlineKeyboardButton
 
@@ -22,20 +21,13 @@ RESET_TIME = int(os.environ.get('RESET_TIME', '3600'))
 if RESET_TIME < 60:
     RESET_TIME = 60
 
-GPT_ENGINE = os.environ.get('GPT_ENGINE', 'gpt-5')
-API_URL = os.environ.get('API_URL', 'https://api.openai.com/v1/chat/completions')
-GOOGLE_AI_API_KEY = os.environ.get('GOOGLE_AI_API_KEY', None)
+BASE_URL = os.environ.get('BASE_URL', 'https://api.openai.com/v1/chat/completions')
+API_KEY = os.environ.get('API_KEY', None)
+MODEL = os.environ.get('MODEL', 'gpt-5')
 
-API = os.environ.get('API', None)
 WEB_HOOK = os.environ.get('WEB_HOOK', None)
 CHAT_MODE = os.environ.get('CHAT_MODE', "global")
-GET_MODELS = (os.environ.get('GET_MODELS', "False") == "False") == False
-
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY', None)
-
-VERTEX_PRIVATE_KEY = os.environ.get('VERTEX_PRIVATE_KEY', None)
-VERTEX_CLIENT_EMAIL = os.environ.get('VERTEX_CLIENT_EMAIL', None)
-VERTEX_PROJECT_ID = os.environ.get('VERTEX_PROJECT_ID', None)
+GET_MODELS = (os.environ.get('GET_MODELS', "True") == "False") == False
 
 PASS_HISTORY = os.environ.get('PASS_HISTORY', 9999)
 if type(PASS_HISTORY) == str:
@@ -81,16 +73,13 @@ LANGUAGES_TO_CODE = {
 current_date = datetime.now()
 Current_Date = current_date.strftime("%Y-%m-%d")
 systemprompt = os.environ.get('SYSTEMPROMPT', prompt.system_prompt.format(LANGUAGE, Current_Date))
-claude_systemprompt = os.environ.get('SYSTEMPROMPT', prompt.claude_system_prompt.format(LANGUAGE))
-
 
 import json
+import tomllib
+import requests
 from contextlib import contextmanager
 
 CONFIG_DIR = os.environ.get('CONFIG_DIR', 'user_configs')
-
-import os
-from contextlib import contextmanager
 
 @contextmanager
 def file_lock(filename):
@@ -114,14 +103,6 @@ def file_lock(filename):
                 yield f
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
-
-# # 使用示例
-# try:
-#     with file_lock("myfile.txt") as f:
-#         # 在这里进行文件操作
-#         f.write("Some data\n")
-# except IOError:
-#     print("无法获取文件锁，文件可能正被其他进程使用")
 
 def save_user_config(user_id, config):
     if not os.path.exists(CONFIG_DIR):
@@ -182,7 +163,6 @@ class UserConfig:
         plugins=None,
         languages=None,
         systemprompt=None,
-        claude_systemprompt=None
     ):
         self.user_id = user_id
         self.language = language
@@ -194,7 +174,6 @@ class UserConfig:
         self.preferences = preferences
         self.plugins = plugins
         self.systemprompt = systemprompt
-        self.claude_systemprompt = claude_systemprompt
         self.users = NestedDict()
         self.users["global"] = self.get_init_preferences()
         # self.users = {
@@ -214,16 +193,6 @@ class UserConfig:
         if not os.path.exists(CONFIG_DIR):
             return
 
-        # 定义旧键名到新键名的映射关系 old_key -> new_key
-        key_mapping = {
-            "SEARCH": "get_search_results",
-            "URL": "get_url_content",
-            "ARXIV": "download_read_arxiv_pdf",
-            "CODE": "run_python_script",
-            "IMAGE": "generate_image",
-            "get_date_time_weekday": "get_time"
-        }
-
         for filename in os.listdir(CONFIG_DIR):
             if filename.endswith('.json'):
                 user_id = filename[:-5]  # 移除 '.json' 后缀
@@ -232,9 +201,9 @@ class UserConfig:
 
                 # 检查并进行键名映射转换
                 updated_config = False
-                for old_key, new_key in key_mapping.items():
-                    if old_key in user_config:
-                        user_config[new_key] = user_config.pop(old_key)
+                for new_plugin, status in self.plugins.items():
+                    if new_plugin not in user_config:
+                        user_config[new_plugin] = status
                         updated_config = True
 
                 # 如果配置有更新，保存回文件
@@ -259,7 +228,6 @@ class UserConfig:
             "language": self.language,
             "engine": self.engine,
             "systemprompt": self.systemprompt,
-            "claude_systemprompt": self.claude_systemprompt,
             "api_key": self.api_key,
             "api_url": self.api_url,
         }
@@ -278,7 +246,7 @@ class UserConfig:
 
     def get_config(self, user_id = None, parameter_name = None):
         if parameter_name not in self.parameter_name_list:
-            raise ValueError("parameter_name is not in the parameter_name_list")
+            raise ValueError(f"parameter_name {parameter_name} is not in the parameter_name_list: {self.parameter_name_list}")
         if self.mode == "global":
             return self.users["global"][parameter_name]
         if self.mode == "multiusers":
@@ -287,7 +255,7 @@ class UserConfig:
 
     def set_config(self, user_id = None, parameter_name = None, value = None):
         if parameter_name not in self.parameter_name_list:
-            raise ValueError("parameter_name is not in the parameter_name_list")
+            raise ValueError(f"parameter_name {parameter_name} is not in the parameter_name_list: {self.parameter_name_list}")
         if self.mode == "global":
             self.users["global"][parameter_name] = value
             update_user_config("global", parameter_name, value)
@@ -321,31 +289,23 @@ class UserConfig:
     def __str__(self):
         return str(self.users)
 
-Users = UserConfig(mode=CHAT_MODE, api_key=API, api_url=API_URL, engine=GPT_ENGINE, preferences=PREFERENCES, plugins=PLUGINS, language=LANGUAGE, languages=LANGUAGES, systemprompt=systemprompt, claude_systemprompt=claude_systemprompt)
+Users = UserConfig(mode=CHAT_MODE, api_key=API_KEY, api_url=BASE_URL, engine=MODEL, preferences=PREFERENCES, plugins=PLUGINS, language=LANGUAGE, languages=LANGUAGES, systemprompt=systemprompt)
 
 temperature = float(os.environ.get('temperature', '0.5'))
-CLAUDE_API = os.environ.get('claude_api_key', None)
 
-ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot = None, None, None, None, None, None
+ChatGPTbot, SummaryBot, whisperBot = None, None, None
 def InitEngine(chat_id=None):
-    global Users, ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot
+    global Users, ChatGPTbot, SummaryBot, whisperBot
     api_key = Users.get_config(chat_id, "api_key")
     api_url = Users.get_config(chat_id, "api_url")
-    if api_key or GOOGLE_AI_API_KEY or CLAUDE_API:
-        ChatGPTbot = chatgpt(temperature=temperature, print_log=True, api_url=api_url, api_key=api_key)
-        SummaryBot = chatgpt(temperature=temperature, use_plugins=False, print_log=True, api_url=api_url, api_key=api_key)
+    if api_key:
+        ChatGPTbot = chatgpt(temperature=temperature, print_log=True, api_url=api_url, api_key=api_key, retry_count=3)
+        SummaryBot = chatgpt(temperature=temperature, use_plugins=False, print_log=True, api_url=api_url, api_key=api_key, retry_count=3)
         whisperBot = whisper(api_key=api_key, api_url=api_url)
-    if GROQ_API_KEY:
-        groqBot = groq(temperature=temperature)
-    if VERTEX_PRIVATE_KEY and VERTEX_CLIENT_EMAIL and VERTEX_PROJECT_ID:
-        vertexBot = vertex(temperature=temperature, print_log=True)
-
-    duckBot = DuckChat()
 
 def update_language_status(language, chat_id=None):
     global Users
     systemprompt = Users.get_config(chat_id, "systemprompt")
-    claude_systemprompt = Users.get_config(chat_id, "claude_systemprompt")
     LAST_LANGUAGE = Users.get_config(chat_id, "language")
     Users.set_config(chat_id, "language", language)
     for lang in LANGUAGES:
@@ -353,31 +313,40 @@ def update_language_status(language, chat_id=None):
 
     Users.set_config(chat_id, language, True)
     systemprompt = systemprompt.replace(LAST_LANGUAGE, Users.get_config(chat_id, "language"))
-    claude_systemprompt = claude_systemprompt.replace(LAST_LANGUAGE, Users.get_config(chat_id, "language"))
     Users.set_config(chat_id, "systemprompt", systemprompt)
-    Users.set_config(chat_id, "claude_systemprompt", claude_systemprompt)
 
 InitEngine(chat_id=None)
 update_language_status(LANGUAGE)
 
 def get_local_version_info():
-    current_directory = os.path.dirname(os.path.abspath(__file__))
-    result = subprocess.run(['git', '-C', current_directory, 'log', '-1'], stdout=subprocess.PIPE)
-    output = result.stdout.decode()
-    return output.split('\n')[0].split(' ')[1]  # 获取本地最新提交的哈希值
+    try:
+        current_directory = os.path.dirname(os.path.abspath(__file__))
+        pyproject_path = os.path.join(current_directory, 'pyproject.toml')
+        with open(pyproject_path, 'rb') as f:
+            data = tomllib.load(f)
+        return data['project']['version']
+    except Exception:
+        return "unknown"
 
 def get_remote_version_info():
-    current_directory = os.path.dirname(os.path.abspath(__file__))
-    result = subprocess.run(['git', '-C', current_directory, 'ls-remote', 'origin', 'HEAD'], stdout=subprocess.PIPE)
-    output = result.stdout.decode()
-    return output.split('\t')[0]  # 获取远程最新提交的哈希值
+    try:
+        url = "https://raw.githubusercontent.com/yym68686/ChatGPT-Telegram-Bot/main/pyproject.toml"
+        response = requests.get(url)
+        response.raise_for_status()
+        data = tomllib.loads(response.text)
+        return data['project']['version']
+    except Exception:
+        return "unknown"
 
 def check_for_updates():
     local_version = get_local_version_info()
     remote_version = get_remote_version_info()
 
+    if local_version == "unknown" or remote_version == "unknown":
+        return "Version check failed."
+
     if local_version == remote_version:
-        return "Up to date."
+        return local_version
     else:
         return "A new version is available! Please redeploy."
 
@@ -393,12 +362,10 @@ def replace_with_asterisk(string):
 def update_info_message(user_id = None):
     api_key = Users.get_config(user_id, "api_key")
     api_url = Users.get_config(user_id, "api_url")
-    if GOOGLE_AI_API_KEY and os.environ.get('API_URL') == None:
-        api_url = "https://generativelanguage.googleapis.com/v1beta"
     return "".join([
         f"**🤖 Model:** `{Users.get_config(user_id, 'engine')}`\n\n",
-        f"**🔑 API:** `{replace_with_asterisk(api_key)}`\n\n" if api_key else "",
-        f"**🔗 API URL:** `{api_url}`\n\n" if api_url else "",
+        f"**🔑 API_KEY:** `{replace_with_asterisk(api_key)}`\n\n" if api_key else "",
+        f"**🔗 BASE URL:** `{api_url}`\n\n" if api_url else "",
         f"**🛜 WEB HOOK:** `{WEB_HOOK}`\n\n" if WEB_HOOK else "",
         f"**🚰 Tokens usage:** `{get_robot(user_id)[0].tokens_usage[str(user_id)]}`\n\n" if get_robot(user_id)[0] else "",
         f"**🃏 NICK:** `{NICK}`\n\n" if NICK else "",
@@ -406,57 +373,22 @@ def update_info_message(user_id = None):
     ])
 
 def reset_ENGINE(chat_id, message=None):
-    global ChatGPTbot, groqBot, vertexBot
+    global ChatGPTbot
     api_key = Users.get_config(chat_id, "api_key")
-    api_url = Users.get_config(chat_id, "api_url")
-    engine = Users.get_config(chat_id, "engine")
     if message:
-        if "claude" in engine:
-            Users.set_config(chat_id, "claude_systemprompt", message)
-        else:
-            Users.set_config(chat_id, "systemprompt", message)
+        Users.set_config(chat_id, "systemprompt", message)
     systemprompt = Users.get_config(chat_id, "systemprompt")
-    claude_systemprompt = Users.get_config(chat_id, "claude_systemprompt")
     if api_key and ChatGPTbot:
-        if "claude" in engine:
-            ChatGPTbot.reset(convo_id=str(chat_id), system_prompt=claude_systemprompt)
-        else:
-            ChatGPTbot.reset(convo_id=str(chat_id), system_prompt=systemprompt)
-    if GROQ_API_KEY and groqBot:
-        groqBot.reset(convo_id=str(chat_id), system_prompt=systemprompt)
-    if VERTEX_PRIVATE_KEY and VERTEX_CLIENT_EMAIL and VERTEX_PROJECT_ID and vertexBot:
-        vertexBot.reset(convo_id=str(chat_id), system_prompt=systemprompt)
+        ChatGPTbot.reset(convo_id=str(chat_id), system_prompt=systemprompt)
 
 def get_robot(chat_id = None):
-    global ChatGPTbot, groqBot, duckBot
+    global ChatGPTbot
     engine = Users.get_config(chat_id, "engine")
     role = "user"
-    if CLAUDE_API and "claude-3" in engine:
-        robot = ChatGPTbot
-        api_key = CLAUDE_API
-        api_url = "https://api.anthropic.com/v1/messages"
-    elif ("mixtral" in engine or "llama" in engine) and GROQ_API_KEY:
-        robot = groqBot
-        api_key = GROQ_API_KEY
-        api_url = "https://api.groq.com/openai/v1/chat/completions"
-    elif GOOGLE_AI_API_KEY and ("gemini" in engine or os.environ.get('API_URL') == None):
-        robot = ChatGPTbot
-        api_key = GOOGLE_AI_API_KEY
-        api_url = "https://generativelanguage.googleapis.com/v1beta/models/{model}:{stream}?key={api_key}"
-        api_url = api_url.format(model=engine, stream="streamGenerateContent", api_key=api_key)
-    elif VERTEX_PRIVATE_KEY and VERTEX_CLIENT_EMAIL and VERTEX_PROJECT_ID and "gemini" in engine:
-        robot = vertexBot
-        api_key = VERTEX_PRIVATE_KEY
-        api_url = "https://us-central1-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/us-central1/publishers/google/models/{MODEL_ID}:{stream}"
-    elif ChatGPTbot:
-        robot = ChatGPTbot
-        api_key = Users.get_config(chat_id, "api_key")
-        api_url = Users.get_config(chat_id, "api_url")
-        api_url = BaseAPI(api_url=api_url).chat_url
-    else:
-        robot = duckBot
-        api_key = "duckduckgo"
-        api_url = None
+    robot = ChatGPTbot
+    api_key = Users.get_config(chat_id, "api_key")
+    api_url = Users.get_config(chat_id, "api_url")
+    api_url = BaseAPI(api_url=api_url).chat_url
 
     return robot, role, api_key, api_url
 
@@ -552,30 +484,11 @@ def create_buttons(strings, plugins_status=False, lang="English", button_text=No
 
 initial_model = [
     "gpt-5",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o4-mini",
     "o3",
     "claude-sonnet-4-20250514",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
 ]
-
-if GROQ_API_KEY:
-    initial_model.extend([
-        "llama-3.1-70b-versatile",
-        "llama-3.1-405b-reasoning",
-    ])
-if GOOGLE_AI_API_KEY or (VERTEX_PRIVATE_KEY and VERTEX_CLIENT_EMAIL and VERTEX_PROJECT_ID):
-    initial_model.extend([
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-    ])
-
-if duckBot:
-    initial_model.extend([
-        "claude-3-haiku",
-        "Meta-Llama-3.1-70B",
-        "Mixtral-8x7B",
-    ])
 
 def remove_no_text_model(model_list):
     set_models = set()
@@ -591,7 +504,8 @@ def remove_no_text_model(model_list):
         set_models.add(model_item)
     return list(set_models)
 
-if GET_MODELS:
+async def get_initial_model():
+    global initial_model
     robot, role, api_key, api_url = get_robot()
     engine = Users.get_config(None, "engine")
     provider = {
@@ -602,7 +516,7 @@ if GET_MODELS:
         "tools": True,
         "image": True
     }
-    initial_model = remove_no_text_model(update_initial_model(provider))
+    initial_model = remove_no_text_model(await update_initial_model(provider))
     if ChatGPTbot:
         robot = ChatGPTbot
         api_key = Users.get_config(None, "api_key")
@@ -616,7 +530,7 @@ if GET_MODELS:
             "tools": True,
             "image": True
         }
-        gpt_initial_model = remove_no_text_model(update_initial_model(provider))
+        gpt_initial_model = remove_no_text_model(await update_initial_model(provider))
         # print("gpt_initial_model", gpt_initial_model)
         initial_model = list(set(gpt_initial_model + initial_model))
 
